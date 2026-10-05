@@ -38,7 +38,6 @@
   #app { position: relative; z-index: 2;
          display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
 
-  /* ================= ЭКРАН АВТОРИЗАЦИИ ================= */
   #authScreen {
     position: fixed; inset: 0; z-index: 100;
     display: flex; align-items: center; justify-content: center;
@@ -125,7 +124,6 @@
     text-align: center; min-height: 18px;
   }
 
-  /* ================= ШАПКА ================= */
   header {
     padding: calc(12px + env(safe-area-inset-top,0px)) 16px 12px;
     border-bottom: 1px solid var(--line);
@@ -161,7 +159,6 @@
   }
   .icon-btn:active { transform: scale(.9); background: var(--bg3); }
 
-  /* ================= СПИСОК ЧАТОВ ================= */
   #content { flex: 1; overflow: hidden; display: flex; position: relative; }
   .pane { flex: 1; display: none; flex-direction: column; overflow: hidden; }
   .pane.active { display: flex; }
@@ -198,7 +195,6 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
 
-  /* ================= ОКНО ЧАТА ================= */
   #chatWindow { flex: 1; display: none; flex-direction: column; }
   #chatWindow.active { display: flex; }
   .chat-header {
@@ -254,7 +250,6 @@
   }
   .send-btn:active { transform: scale(.92); }
 
-  /* ================= ТОСТ ================= */
   #toast {
     position: fixed; left: 50%; bottom: 100px;
     transform: translateX(-50%) translateY(20px);
@@ -265,6 +260,28 @@
     max-width: 90vw; overflow: hidden; text-overflow: ellipsis;
   }
   #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* ===== баннер запроса уведомлений ===== */
+  #notifyBanner {
+    position: fixed; top: calc(12px + env(safe-area-inset-top,0px));
+    left: 50%; transform: translateX(-50%);
+    background: rgba(26,32,41,.98); border: 1px solid var(--accent);
+    color: var(--text); padding: 10px 16px; border-radius: 12px;
+    font-size: 13px; z-index: 1000; display: none;
+    box-shadow: 0 8px 24px rgba(0,0,0,.5); gap: 10px;
+    align-items: center; max-width: 92vw;
+  }
+  #notifyBanner.show { display: flex; }
+  #notifyBanner button {
+    background: var(--accent); border: none; color: #fff;
+    padding: 6px 12px; border-radius: 8px; font-size: 12px;
+    font-weight: 700; cursor: pointer; font-family: inherit;
+    flex-shrink: 0;
+  }
+  #notifyBanner button.later {
+    background: transparent; border: 1px solid var(--line);
+    color: var(--dim);
+  }
 </style>
 </head>
 <body>
@@ -272,7 +289,13 @@
 <canvas id="bgCanvas"></canvas>
 <div id="bgOverlay"></div>
 
-<!-- ================= ЭКРАН АВТОРИЗАЦИИ ================= -->
+<!-- баннер "включить уведомления" -->
+<div id="notifyBanner">
+  <span>🔔 Включить уведомления о сообщениях?</span>
+  <button id="notifyYes">Включить</button>
+  <button class="later" id="notifyLater">Позже</button>
+</div>
+
 <div id="authScreen">
   <div class="auth-box">
     <div class="auth-logo">
@@ -300,7 +323,6 @@
   </div>
 </div>
 
-<!-- ================= ОСНОВНОЙ ИНТЕРФЕЙС ================= -->
 <div id="app" style="display:none">
   <header>
     <div class="logo-small">NEXUS</div>
@@ -338,6 +360,17 @@
 <div id="toast"></div>
 
 <script>
+/* ================================================================
+   ================  ВСТАВЬ_СЮДА #1: VAPID PUBLIC KEY  ============
+   Возьми на https://vapidkeys.com → поле "Public Key"
+   ================================================================ */
+const VAPID_PUBLIC_KEY = "cryptography.hazmat.bindings._rust.openssl.ec.ECPublicKey object at 0x00000209F28DC930";
+
+/* ================================================================
+   ================  ОБЫЧНЫЙ РЕЖИМ (без пушей)  ===================
+   Ниже — рабочий код мессенджера. Менять не надо.
+   ================================================================ */
+
 const $ = id => document.getElementById(id);
 let base = '';
 let currentUser = null;
@@ -345,18 +378,16 @@ let ws = null;
 let currentPeer = null;
 let allUsers = [];
 
-/* ================= ФОН CANVAS ================= */
+/* ---------- фон ---------- */
 const canvas = $('bgCanvas');
 const ctx = canvas.getContext('2d');
 let particles = [];
-
 function resize() {
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
 }
 window.addEventListener('resize', resize);
 resize();
-
 for (let i = 0; i < 120; i++) {
   particles.push({
     x: Math.random() * canvas.width,
@@ -367,7 +398,6 @@ for (let i = 0; i < 120; i++) {
     a: Math.random() * .5 + .2,
   });
 }
-
 function drawBg() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   for (const p of particles) {
@@ -383,7 +413,6 @@ function drawBg() {
 }
 drawBg();
 
-/* ================= ПОМОЩНИКИ ================= */
 function toast(msg) {
   const t = $('toast');
   t.textContent = msg;
@@ -407,7 +436,6 @@ function escapeHtml(s) {
 
 /* ================= АВТОРИЗАЦИЯ ================= */
 let authMode = 'login';
-
 document.querySelectorAll('.tabs-auth button').forEach(b => {
   b.onclick = () => {
     document.querySelectorAll('.tabs-auth button').forEach(x => x.classList.remove('active'));
@@ -422,13 +450,10 @@ $('authSubmit').onclick = async () => {
   const name = $('authName').value.trim();
   const pass = $('authPass').value;
   const err = $('authError');
-
   if (!name || !pass) { err.textContent = 'Заполни оба поля'; return; }
-
   err.textContent = '';
   $('authSubmit').disabled = true;
   $('authSubmit').textContent = '...';
-
   try {
     if (authMode === 'register') {
       const j = await api('/auth/register', {
@@ -448,13 +473,12 @@ $('authSubmit').onclick = async () => {
       localStorage.setItem('uname', j.name);
       currentUser = {id: j.id, name: j.name};
     }
-
     $('authScreen').classList.add('hide');
     $('app').style.display = 'flex';
     setTimeout(() => $('authScreen').style.display = 'none', 500);
-
     await loadUsers();
     connectWS();
+    askNotifications();
   } catch (e) {
     err.textContent = e.message || 'Ошибка';
   } finally {
@@ -463,7 +487,7 @@ $('authSubmit').onclick = async () => {
   }
 };
 
-// автовход
+/* автовход */
 (async () => {
   const uid = localStorage.getItem('uid');
   const uname = localStorage.getItem('uname');
@@ -474,6 +498,7 @@ $('authSubmit').onclick = async () => {
     setTimeout(() => $('authScreen').style.display = 'none', 300);
     await loadUsers();
     connectWS();
+    askNotifications();
   }
 })();
 
@@ -489,7 +514,7 @@ function renderChatList() {
   const list = allUsers.filter(u => u.id !== currentUser.id);
   if (!list.length) {
     el.innerHTML = '<div style="color:var(--dim);text-align:center;padding:40px 20px;font-size:15px">' +
-      'Пока никого нет.<br><br>Попроси родных зарегистрироваться — они появятся здесь.</div>';
+      'Пока никого нет.<br><br>Попроси родных зарегистрироваться.</div>';
     return;
   }
   let i = 0;
@@ -556,7 +581,6 @@ $('msgInput').addEventListener('input', e => {
   e.target.style.height = 'auto';
   e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
 });
-
 $('msgInput').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('sendMsg').click(); }
 });
@@ -574,9 +598,7 @@ function connectWS() {
         addMessage(m, m.from === currentUser.id ? 'user' : 'bot');
       }
       if (m.from !== currentUser.id && document.hidden) {
-        if ('Notification' in window && Notification.permission === 'granted') {
-          new Notification('Новое сообщение', {body: m.text.slice(0, 100)});
-        }
+        showNotification('Новое сообщение', m.text.slice(0, 100));
       }
     }
   };
@@ -598,8 +620,7 @@ $('searchInput').addEventListener('input', e => {
   const found = allUsers.filter(u => u.id !== currentUser.id &&
     u.name.toLowerCase().includes(q.toLowerCase()));
   if (!found.length) {
-    el.innerHTML = '<div style="color:var(--dim);text-align:center;padding:40px 20px;font-size:15px">' +
-      'Ничего не найдено</div>';
+    el.innerHTML = '<div style="color:var(--dim);text-align:center;padding:40px 20px;font-size:15px">Ничего не найдено</div>';
     return;
   }
   for (const u of found) {
@@ -620,13 +641,91 @@ $('searchInput').addEventListener('input', e => {
   }
 });
 
-/* ================= ВЫХОД ================= */
 $('btnLogout').onclick = () => {
   if (confirm('Выйти из аккаунта?')) {
     localStorage.clear();
     location.reload();
   }
 };
+
+/* ================================================================
+   ================  УВЕДОМЛЕНИЯ  =================================
+   ================================================================ */
+
+// баннер "включить уведомления" показываем, если разрешение ещё не дано
+function askNotifications() {
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'granted') {
+    subscribePush();
+    return;
+  }
+  if (Notification.permission === 'denied') return;
+  // показываем баннер через 3 секунды после входа
+  setTimeout(() => $('notifyBanner').classList.add('show'), 3000);
+}
+
+$('notifyYes').onclick = async () => {
+  $('notifyBanner').classList.remove('show');
+  const perm = await Notification.requestPermission();
+  if (perm === 'granted') {
+    toast('Уведомления включены');
+    subscribePush();
+  } else {
+    toast('Уведомления отклонены');
+  }
+};
+
+$('notifyLater').onclick = () => {
+  $('notifyBanner').classList.remove('show');
+  localStorage.setItem('notify_later', Date.now());
+};
+
+// локальный показ (когда вкладка открыта)
+function showNotification(title, body) {
+  if (!('Notification' in window)) return;
+  if (Notification.permission !== 'granted') return;
+  try {
+    const n = new Notification(title, {
+      body,
+      icon: '/icon.png',
+      tag: 'nexus-msg',
+    });
+    n.onclick = () => { window.focus(); n.close(); };
+    setTimeout(() => n.close(), 6000);
+  } catch (e) {}
+}
+
+// ================================================================
+// Service Worker + Push (настоящие пуши, работают когда вкладка закрыта)
+// ================================================================
+async function subscribePush() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+  if (!VAPID_PUBLIC_KEY || VAPID_PUBLIC_KEY === 'ВСТАВЬ_СЮДА_PUBLIC_KEY') return;
+
+  try {
+    const reg = await navigator.serviceWorker.register('/service-worker.js');
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+    });
+    // отправляем подписку на сервер
+    await api('/push/subscribe', {
+      method: 'POST',
+      body: JSON.stringify({uid: currentUser.id, sub}),
+    });
+  } catch (e) {
+    console.warn('push subscribe failed', e);
+  }
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  const arr = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  return arr;
+}
 
 /* ================= СТАРТ ================= */
 if (location.protocol === 'file:') {
