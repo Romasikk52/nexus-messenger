@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: nexus-messenger
+    plan: free
+    runtime: docker
+    dockerfilePath: ./Dockerfile
