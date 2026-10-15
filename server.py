@@ -1,11 +1,11 @@
 # language: Python 3.11, file: server.py
-# Nexus Messenger v2 — Discord-style, регистрация по номеру, друзья, звонки, группы, файлы.
+# Nexus Messenger v3. Регистрация по номеру ИЛИ юзернейму. Звонки, группы, файлы.
 # Запуск: uvicorn server:app --host 0.0.0.0 --port 8000
 
-import asyncio, json, os, re, time, uuid, base64
+import asyncio, json, os, re, time, uuid
 from pathlib import Path
-from typing import Dict, List, Optional
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+from typing import Dict, List
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -14,18 +14,17 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
 UPLOAD_DIR = Path("uploads"); UPLOAD_DIR.mkdir(exist_ok=True)
-AVATAR_DIR = Path("avatars"); AVATAR_DIR.mkdir(exist_ok=True)
 
 # ==================== ХРАНИЛИЩЕ ====================
-users: Dict[str, dict] = {}          # uid -> {phone, password, username, avatar, online}
-by_phone: Dict[str, str] = {}        # phone -> uid
-by_username: Dict[str, str] = {}     # username -> uid
-friends: Dict[str, set] = {}         # uid -> set(uid)
-groups: Dict[str, dict] = {}         # gid -> {name, avatar, owner, members:set}
-messages: List[dict] = []            # [{id, from, to, text, ts, type, file}]
-calls: Dict[str, dict] = {}          # call_id -> {from, to, type, sdp, candidates, state}
+users: Dict[str, dict] = {}
+by_phone: Dict[str, str] = {}
+by_username: Dict[str, str] = {}
+friends: Dict[str, set] = {}
+groups: Dict[str, dict] = {}
+messages: List[dict] = []
+calls: Dict[str, dict] = {}
 
-# ==================== WS МЕНЕДЖЕР ====================
+# ==================== WEBSOCKET МЕНЕДЖЕР ====================
 class WSManager:
     def __init__(self): self.conns: Dict[str, WebSocket] = {}
     async def connect(self, uid, ws):
@@ -42,30 +41,41 @@ class WSManager:
 
 ws_mgr = WSManager()
 
-# ==================== АУТЕНТИФИКАЦИЯ ====================
+# ==================== ВАЛИДАЦИЯ ====================
 def valid_phone(p: str) -> bool:
-    return bool(re.match(r"^\+?\d{10,15}$", p.replace(" ", "").replace("-", "")))
+    return bool(re.match(r"^\+?\d{10,15}$", p.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")))
 
 def valid_username(u: str) -> bool:
     return bool(re.match(r"^[a-zA-Z0-9_]{3,20}$", u))
 
+# ==================== АУТЕНТИФИКАЦИЯ ====================
 @app.post("/auth/register")
 async def register(req: Request):
     b = await req.json()
-    phone = b.get("phone", "").strip()
+    phone = (b.get("phone") or "").strip()
     password = b.get("password", "")
-    username = b.get("username", "").strip().lstrip("@")
+    username = (b.get("username") or "").strip().lstrip("@")
 
-    if not valid_phone(phone):
-        return JSONResponse({"error": "Неверный номер"}, status_code=400)
-    if phone in by_phone:
-        return JSONResponse({"error": "Номер уже занят"}, status_code=400)
+    if not phone and not username:
+        return JSONResponse({"error": "Укажи номер телефона или юзернейм"}, status_code=400)
+
+    if phone:
+        if not valid_phone(phone):
+            return JSONResponse({"error": "Неверный формат номера"}, status_code=400)
+        if phone in by_phone:
+            return JSONResponse({"error": "Этот номер уже зарегистрирован"}, status_code=400)
+
+    if username:
+        if not valid_username(username):
+            return JSONResponse({"error": "Юзернейм: 3-20 символов, только a-z 0-9 _"}, status_code=400)
+        if username in by_username:
+            return JSONResponse({"error": "Этот юзернейм занят"}, status_code=400)
+
     if not username:
         username = "user_" + str(uuid.uuid4())[:6]
-    if not valid_username(username):
-        return JSONResponse({"error": "Юзернейм: 3-20 символов, a-z 0-9 _"}, status_code=400)
-    if username in by_username:
-        return JSONResponse({"error": "Юзернейм занят"}, status_code=400)
+        while username in by_username:
+            username = "user_" + str(uuid.uuid4())[:6]
+
     if len(password) < 4:
         return JSONResponse({"error": "Пароль минимум 4 символа"}, status_code=400)
 
@@ -74,21 +84,38 @@ async def register(req: Request):
         "phone": phone, "password": password, "username": username,
         "avatar": "", "online": True, "created": time.time(),
     }
-    by_phone[phone] = uid
+    if phone: by_phone[phone] = uid
     by_username[username] = uid
     friends[uid] = set()
+
     return {"id": uid, "username": username, "phone": phone}
 
 @app.post("/auth/login")
 async def login(req: Request):
     b = await req.json()
-    phone = b.get("phone", "").strip()
+    login_id = (b.get("login") or "").strip()
     password = b.get("password", "")
-    uid = by_phone.get(phone)
+
+    if not login_id or not password:
+        return JSONResponse({"error": "Заполни оба поля"}, status_code=400)
+
+    uid = None
+    clean = login_id.lstrip("@")
+    # ищем как username
+    for u, i in by_username.items():
+        if u.lower() == clean.lower():
+            uid = i
+            break
+    # ищем как телефон
+    if not uid:
+        ph = clean.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+        uid = by_phone.get(ph) or by_phone.get("+" + ph) or by_phone.get(ph[1:] if ph.startswith("+") else ph)
+
     if not uid or users[uid]["password"] != password:
-        return JSONResponse({"error": "Неверный номер или пароль"}, status_code=401)
+        return JSONResponse({"error": "Неверный логин или пароль"}, status_code=401)
+
     users[uid]["online"] = True
-    return {"id": uid, "username": users[uid]["username"], "phone": phone}
+    return {"id": uid, "username": users[uid]["username"], "phone": users[uid]["phone"]}
 
 @app.get("/user/{uid}")
 async def get_user(uid: str):
@@ -99,10 +126,10 @@ async def get_user(uid: str):
 @app.post("/user/{uid}/username")
 async def change_username(uid: str, req: Request):
     b = await req.json()
-    new = b.get("username", "").strip().lstrip("@")
+    new = (b.get("username") or "").strip().lstrip("@")
     if not valid_username(new):
         return JSONResponse({"error": "Некорректный юзернейм"}, status_code=400)
-    if new in by_username and by_username[new] != uid:
+    if new.lower() in [u.lower() for u in by_username if by_username[u] != uid]:
         return JSONResponse({"error": "Занят"}, status_code=400)
     old = users[uid]["username"]
     by_username.pop(old, None)
@@ -118,10 +145,11 @@ async def search(q: str = ""):
     results = []
     for uid, u in users.items():
         if q.lower() in u["username"].lower() or q in u["phone"]:
+            p = u["phone"]
+            masked = (p[:4] + "***" + p[-2:]) if len(p) > 6 else (p or "—")
             results.append({
                 "id": uid, "username": u["username"],
-                "phone": u["phone"][:4] + "***" + u["phone"][-2:],
-                "online": u.get("online", False),
+                "phone": masked, "online": u.get("online", False),
             })
     return results[:20]
 
@@ -149,20 +177,12 @@ async def add_friend(uid: str, req: Request):
     await ws_mgr.send(target, {"type": "friend_added", "from": uid})
     return {"ok": True}
 
-@app.post("/friends/{uid}/remove")
-async def remove_friend(uid: str, req: Request):
-    b = await req.json()
-    target = b.get("target")
-    friends.get(uid, set()).discard(target)
-    friends.get(target, set()).discard(uid)
-    return {"ok": True}
-
 # ==================== ГРУППЫ ====================
 @app.post("/groups/create")
 async def create_group(req: Request):
     b = await req.json()
     owner = b.get("owner")
-    name = b.get("name", "Группа").strip()[:50]
+    name = (b.get("name") or "Группа").strip()[:50]
     members = b.get("members", [])
     if owner not in users:
         return JSONResponse({"error": "no owner"}, status_code=400)
@@ -182,16 +202,6 @@ async def get_groups(uid: str):
             out.append({"id": gid, "name": g["name"], "avatar": g["avatar"],
                         "count": len(g["members"])})
     return out
-
-@app.post("/groups/{gid}/add")
-async def group_add(gid: str, req: Request):
-    b = await req.json()
-    target = b.get("target")
-    if gid in groups and target in users:
-        groups[gid]["members"].add(target)
-        await ws_mgr.send(target, {"type": "group_added", "gid": gid, "name": groups[gid]["name"]})
-        return {"ok": True}
-    return JSONResponse({"error": "not found"}, status_code=404)
 
 # ==================== СООБЩЕНИЯ ====================
 @app.get("/messages/{uid}")
@@ -219,11 +229,10 @@ async def upload(file: UploadFile = File(...)):
 @app.get("/files/{name}")
 async def get_file(name: str):
     p = UPLOAD_DIR / name
-    if p.exists():
-        return FileResponse(p)
+    if p.exists(): return FileResponse(p)
     return JSONResponse({"error": "not found"}, status_code=404)
 
-# ==================== WEBSOCKET ЧАТ ====================
+# ==================== WEBSOCKET ====================
 @app.websocket("/ws/chat/{uid}")
 async def ws_chat(ws: WebSocket, uid: str):
     if uid not in users:
@@ -237,13 +246,10 @@ async def ws_chat(ws: WebSocket, uid: str):
             data = await ws.receive_json()
             t = data.get("type", "msg")
 
-            # обычное сообщение
             if t == "msg":
                 m = {
-                    "id": str(uuid.uuid4()),
-                    "from": uid,
-                    "to": data.get("to"),
-                    "gid": data.get("gid"),
+                    "id": str(uuid.uuid4()), "from": uid,
+                    "to": data.get("to"), "gid": data.get("gid"),
                     "text": data.get("text", ""),
                     "type": data.get("msg_type", "text"),
                     "file": data.get("file"),
@@ -260,19 +266,18 @@ async def ws_chat(ws: WebSocket, uid: str):
                     await ws_mgr.send(m["to"], {"type": "msg", "msg": m})
                 await ws_mgr.send(uid, {"type": "msg", "msg": m})
 
-            # печатает
             elif t == "typing":
                 target = data.get("to") or data.get("gid")
                 if target:
                     await ws_mgr.send(target, {"type": "typing", "from": uid})
 
-            # сигналинг звонка (WebRTC)
             elif t in ("call_offer", "call_answer", "call_ice", "call_end", "call_reject"):
                 target = data.get("to")
                 data["from"] = uid
                 if t == "call_offer":
                     cid = data.get("call_id") or str(uuid.uuid4())
-                    calls[cid] = {"from": uid, "to": target, "type": data.get("call_type", "audio"),
+                    calls[cid] = {"from": uid, "to": target,
+                                  "type": data.get("call_type", "audio"),
                                   "state": "ringing", "started": time.time()}
                     data["call_id"] = cid
                 await ws_mgr.send(target, data)
@@ -292,5 +297,5 @@ async def index():
 
 if __name__ == "__main__":
     import uvicorn
-    print("[*] Nexus v2 на http://0.0.0.0:8000")
+    print("[*] Nexus v3 на http://0.0.0.0:8000")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
